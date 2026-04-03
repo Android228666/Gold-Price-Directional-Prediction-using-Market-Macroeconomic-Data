@@ -1,0 +1,523 @@
+---
+title: "Case Study - Eksploracja danych"
+author: "Andrii Khomenko"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, message=FALSE, warning=FALSE}
+packages <- c("tidyverse", "naniar", "zoo", "reshape2", "caret", "OneR", "randomForest", "lubridate")
+to_install <- packages[!packages %in% installed.packages()[, "Package"]]
+if(length(to_install) > 0) install.packages(to_install)
+
+library(tidyverse)
+library(naniar)
+library(zoo)
+library(reshape2)
+library(caret)
+library(OneR)
+library(randomForest)
+library(lubridate)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# 1) Wczytanie danych i przygotowanie podstawowe
+```{r}
+# Wczytanie
+df = read.csv("financial_regression.csv")
+# Typy + sortowanie
+df$date <- as.Date(df$date)
+df <- df %>% arrange(date)
+
+glimpse(df)
+summary(df$date)
+```
+
+```
+Dane zostały wczytane z pliku CSV. Zmienna date została przekonwertowana na typ daty, a następnie dane posortowano rosnąco według czasu, ponieważ zbiór ma charakter szeregu czasowego.
+```
+
+# 2) Kontrola wymiarów i braków danych
+```{r}
+# Wymiary
+nrow(df)
+ncol(df)
+
+
+# Zmienne, które analizujemy
+vars_na = names(df)
+
+# Tabela z liczbą i procentem braków
+na_summary <- tibble(
+  variable = vars_na,
+  missing_count = sapply(df[vars_na], function(x) sum(is.na(x))),
+  missing_percent = round(
+    sapply(df[vars_na], function(x) mean(is.na(x)) * 100),
+    2
+  )
+)
+
+na_summary
+```
+
+```
+Na tym etapie sprawdzono liczbę obserwacji, zmiennych oraz skalę braków danych dla wybranych, istotnych kolumn.
+```
+
+# 3) Przygotowanie danych (Data Preparation)
+## 3.0.1) Analiza wartości odstających
+```{r}
+vars_outliers <- c(
+  "gold.close",
+  "sp500.close",
+  "oil.close",
+  "silver.close",
+  "platinum.close",
+  "palladium.close"
+)
+
+df_long <- df %>%
+  select(all_of(vars_outliers)) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "value"
+  )
+
+ggplot(df_long, aes(x = variable, y = value)) +
+  geom_boxplot(outlier.colour = "red", alpha = 0.7) +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Wykres 3.0.1. Boxploty cen zamknięcia wybranych instrumentów",
+    x = "Zmienna",
+    y = "Wartość"
+  )
+
+```
+```
+Na wykresie widoczne są wartości odstające, szczególnie dla metali szlachetnych oraz indeksów giełdowych. Wartości te odpowiadają rzeczywistym skokom rynkowym i nie zostały usunięte z analizy.
+```
+## 3.0.2) Outliers w ujęciu czasowym
+```{r}
+Q1 <- quantile(df$gold.close, 0.25, na.rm=TRUE)
+Q3 <- quantile(df$gold.close, 0.75, na.rm=TRUE)
+IQR_val <- Q3 - Q1
+
+df <- df %>%
+  mutate(
+    gold_outlier = gold.close < (Q1 - 1.5 * IQR_val) |
+                   gold.close > (Q3 + 1.5 * IQR_val)
+  )
+
+ggplot(df, aes(x = date, y = gold.close)) +
+  geom_line(alpha = 0.6) +
+  geom_point(
+    data = df %>% filter(gold_outlier),
+    color = "red",
+    size = 2
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Wykres 3.0.2. Wartości odstające ceny złota w czasie",
+    x = "Data",
+    y = "Cena zamknięcia złota"
+  )
+
+```
+```
+Wartości odstające występują głównie w okresach podwyższonej zmienności rynkowej. Nie zostały one usunięte, ponieważ odzwierciedlają rzeczywiste zdarzenia ekonomiczne.
+```
+
+
+## 3.0.3) Zmienność (volatility)
+```{r}
+df <- df %>%
+  mutate(
+    gold_return = 100 * (gold.close - lag(gold.close)) / lag(gold.close)
+  )
+
+ggplot(df, aes(x = date, y = gold_return)) +
+  geom_line(alpha = 0.6) +
+  theme_minimal() +
+  labs(
+    title = "Wykres 3.0.3. Dzienne stopy zwrotu ceny złota",
+    x = "Data",
+    y = "Stopa zwrotu (%)"
+  )
+
+```
+```
+Wysoka zmienność dziennych stóp zwrotu potwierdza, że krótkoterminowa predykcja kierunku ceny złota jest zadaniem trudnym.
+```
+
+
+## 3.1) Missingness plot
+```{r}
+p_miss <- df %>%
+  select(date, gold.close, sp500.close, CPI, GDP) %>%
+  vis_miss() +
+  labs(title = "Wykres 3.1. Wizualizacja braków danych dla wybranych zmiennych") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+print(p_miss)
+```
+
+```
+Na wykresie widać, że zmienne rynkowe mają mniej braków, natomiast CPI i GDP zawierają długie okresy bez obserwacji, co wynika z ich niższej częstotliwości raportowania.
+```
+
+## 3.2) Uzupełnianie danych makroekonomicznych (forward-fill)
+```{r}
+df <- df %>%
+  mutate(
+    CPI_original = CPI,
+    GDP_original = GDP,
+    us_rates_original = us_rates_.
+  )
+
+df <- df %>%
+  mutate(
+    CPI = na.locf(CPI, na.rm = FALSE),
+    GDP = na.locf(GDP, na.rm = FALSE),
+    us_rates_. = na.locf(us_rates_., na.rm = FALSE)
+  )
+
+sapply(df[c("CPI", "GDP", "us_rates_.")], function(x) sum(is.na(x)))
+
+```
+```
+Zastosowano metodę forward-fill, polegającą na przenoszeniu ostatniej znanej wartości do momentu pojawienia się nowej obserwacji. Braki na początku szeregu nie są uzupełniane.
+```
+
+```{r}
+df <- df %>%
+  filter(
+    !is.na(CPI),
+    !is.na(GDP),
+    !is.na(us_rates_.)
+  )
+
+sapply(df[c("CPI", "GDP", "us_rates_.")], function(x) sum(is.na(x)))
+```
+```
+Początkowe obserwacje bez danych makroekonomicznych zostały usunięte.
+```
+
+# 3.3) Podsumowanie braków danych
+```{r}
+num_cols <- df %>%
+  select(-date) %>%
+  select(where(is.numeric)) %>%
+  colnames()
+
+na_summary_all <- tibble(
+  variable = num_cols,
+  missing_count = sapply(df[num_cols], function(x) sum(is.na(x))),
+  missing_percent = round(sapply(df[num_cols], function(x) mean(is.na(x)) * 100), 2)
+) %>%
+  arrange(desc(missing_count))
+
+na_summary_all %>% filter(missing_count > 0)
+```
+
+```{r}
+df_numeric <- df %>% select(-c(date, GDP_original, CPI_original, us_rates_original))
+
+overall_missing_percent <- round(
+  sum(is.na(df_numeric)) / prod(dim(df_numeric)) * 100, 2
+)
+
+overall_missing_percent
+
+```
+
+```
+Mamy 4.47% braku danych, więc bezpiecznie możemy usunąć te wiersze, bo po pierwsze to jest mniej niż 5%, a po drugie też to braki które jeśli występują, to nie ma całego wiersza, co oznacza, że nie ma sensu to imputować.
+```
+
+# Usunięcie wierszy z NA
+```{r}
+df <- df %>% select(-c(GDP_original, CPI_original, us_rates_original)) %>% drop_na()
+sum(is.na(df))
+nrow(df)
+```
+
+
+# 3.4) Konstrukcja zmiennej decyzyjnej
+```
+Tworzymy zmienną klasową:
+UP – cena złota wzrosła względem poprzedniego dnia
+DOWN – cena złota spadła lub pozostała bez zmian
+```
+
+```{r}
+df <- df %>%
+  arrange(date) %>%
+  mutate(gold_diff = gold.close - lag(gold.close))
+
+df <- df %>%
+  mutate(gold_direction = ifelse(gold_diff > 0, "UP", "DOWN"))
+
+df$gold_direction <- factor(df$gold_direction)
+
+df <- df %>% filter(!is.na(gold_diff))
+
+table(df$gold_direction)
+
+```
+# Rozkład klas zmiennej decyzyjnej
+```{r}
+ggplot(df, aes(x = gold_direction)) +
+  geom_bar(fill="lightblue") +
+  theme_minimal() +
+  labs(
+    title = "Wykres 3.3. Rozkład klas zmiennej gold_direction",
+    x = "Klasa",
+    y = "Liczba obserwacji"
+  )
+```
+```
+Rozkład klas jest zbliżony, co jest korzystne z punktu widzenia klasyfikacji.
+```
+
+# 3.5) Przygotowanie zbioru cech
+
+```{r}
+X_numeric <- df %>%
+  select(where(is.numeric)) %>%
+  select(-gold_diff, -gold.close, -gold_return)
+
+C <- cor(X_numeric)
+
+to_remove <- findCorrelation(C, cutoff = 0.95, names = TRUE)
+to_remove
+```
+# Finalny zbior cech
+```{r}
+X_final <- X_numeric %>% select(-all_of(to_remove))
+
+model_df <- df %>%
+  select(date, gold_direction) %>%
+  bind_cols(X_final)
+
+
+glimpse(model_df)
+```
+
+```{r}
+C_final <- cor(X_final)
+C_long <- melt(C_final)
+
+top_corr <- C_long %>%
+  filter(Var1 != Var2) %>%
+  mutate(abs_corr = abs(value)) %>%
+  rowwise() %>%
+  mutate(pair = paste(sort(c(Var1, Var2)), collapse = " | ")) %>%
+  ungroup() %>%
+  distinct(pair, .keep_all = TRUE) %>%
+  arrange(desc(abs_corr)) %>%
+  slice(1:10)
+
+top_corr[, c("Var1", "Var2", "value")]
+```
+```
+Usunięto cechy o bardzo wysokiej korelacji, aby ograniczyć redundancję informacji.
+```
+
+
+# 3.6) Podział danych
+
+```{r}
+model_df <- model_df %>% arrange(date)
+
+pred_df <- tail(model_df, 4)
+rest_df <- head(model_df, -4)
+
+n_rest <- nrow(rest_df)
+split_idx <- floor(0.8 * n_rest)
+
+train_df <- rest_df[1:split_idx, ]
+test_df  <- rest_df[(split_idx + 1):n_rest, ]
+
+range(train_df$date)
+range(test_df$date)
+range(pred_df$date)
+
+
+```
+
+```{r}
+X_train <- train_df %>% select(-date, -gold_direction)
+y_train <- train_df$gold_direction
+
+X_test <- test_df %>% select(-date, -gold_direction)
+y_test <- test_df$gold_direction
+
+X_pred <- pred_df %>% select(-date, -gold_direction)
+
+```
+
+```
+Podział wykonano z zachowaniem kolejności czasowej. Cztery ostatnie obserwacje wydzielono jako zbiór predykcyjny.
+```
+
+
+# 4) Modelowanie
+
+## 4.1) Model 1 - OneR (One Rule)
+```{r}
+oner_model <- OneR(
+  gold_direction ~ .,
+  data = train_df %>% select(-date)
+)
+
+oner_model
+```
+
+
+
+```{r}
+oner_pred_test <- predict(oner_model, X_test)
+
+confusionMatrix(
+  factor(oner_pred_test, levels = levels(y_test)),
+  y_test,
+  positive = "UP"
+)
+
+```
+
+```{r}
+oner_pred_pred <- predict(oner_model, X_pred)
+
+pred_df %>%
+  select(date, gold_direction) %>%
+  mutate(OneR_prediction = oner_pred_pred)
+
+```
+
+
+## 4.2) Model 2 - Random Forest
+```{r}
+ntree_vals <- c(50, 100, 200, 300, 500, 1000, 1500)
+
+oob_error <- sapply(ntree_vals, function(n) {
+     rf <- randomForest(
+     x = X_train,
+     y = y_train,
+     ntree = n
+   )
+   rf$err.rate[n, "OOB"]
+})
+
+data.frame(
+   ntree = ntree_vals,
+   OOB_error = oob_error
+)
+```
+
+
+```{r}
+set.seed(123)
+
+rf_model <- randomForest(
+  x = X_train,
+  y = y_train,
+  ntree = 1000,
+  importance = TRUE
+)
+
+rf_model
+
+
+```
+
+```{r}
+rf_pred_test <- predict(rf_model, X_test)
+
+confusionMatrix(
+  factor(rf_pred_test, levels = levels(y_test)),
+  y_test,
+  positive = "UP"
+)
+```
+
+```{r}
+importance_rf <- importance(rf_model)
+
+importance_rf_df <- data.frame(
+  variable = rownames(importance_rf),
+  MeanDecreaseGini = importance_rf[, "MeanDecreaseGini"]
+) %>%
+  arrange(desc(MeanDecreaseGini))
+
+head(importance_rf_df, 10)
+
+```
+
+```{r}
+ggplot(importance_rf_df[1:10, ],
+       aes(x = reorder(variable, MeanDecreaseGini),
+           y = MeanDecreaseGini)) +
+  geom_col() +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Wykres 4.2. Najważniejsze cechy według Random Forest",
+    x = "Zmienna",
+    y = "Mean Decrease Gini"
+  )
+
+```
+
+
+
+
+```{r}
+rf_pred_pred <- predict(rf_model, X_pred)
+
+pred_df %>%
+  select(date, gold_direction) %>%
+  mutate(RandomForest_prediction = rf_pred_pred)
+
+```
+
+
+```
+Model Random Forest został wykorzystany jako bardziej złożony algorytm klasyfikacyjny, umożliwiający wykorzystanie wielu zmiennych jednocześnie oraz modelowanie zależności nieliniowych. Jakość modelu oceniono na zbiorze walidacyjnym, natomiast predykcje dla czterech ostatnich obserwacji wykonano na wydzielonym zbiorze predykcyjnym. Dodatkowo przeanalizowano ważność cech, co pozwoliło zidentyfikować zmienne o największym wpływie na decyzje modelu.
+```
+
+# 5) Ewaluacja modeli
+```{r}
+oner_cm <- confusionMatrix(
+  factor(oner_pred_test, levels = levels(y_test)),
+  y_test,
+  positive = "UP"
+)
+
+rf_cm <- confusionMatrix(
+  factor(rf_pred_test, levels = levels(y_test)),
+  y_test,
+  positive = "UP"
+)
+
+evaluation_table <- data.frame(
+  Model = c("OneR", "Random Forest"),
+  Accuracy = c(oner_cm$overall["Accuracy"], rf_cm$overall["Accuracy"]),
+  Precision = c(oner_cm$byClass["Precision"], rf_cm$byClass["Precision"]),
+  Recall = c(oner_cm$byClass["Recall"], rf_cm$byClass["Recall"]),
+  F1 = c(oner_cm$byClass["F1"], rf_cm$byClass["F1"])
+)
+
+evaluation_table
+```
+
+
